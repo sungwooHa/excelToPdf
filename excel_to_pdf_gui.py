@@ -7,6 +7,7 @@ from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
 import importlib.util
 from packaging import version
+import re
 
 # Check for required packages
 def check_package(package_name, min_version=None):
@@ -295,7 +296,15 @@ class ExcelToPdfConverter:
         # Generate output path with duplicate handling
         base_filename = os.path.basename(os.path.splitext(excel_path)[0])
         output_filename = base_filename + '.pdf'
-        
+
+        # 한글 또는 공백이 있는 경우 안전한 파일명으로 처리
+        if "통합" in output_filename or ' ' in output_filename or any(ord(c) > 127 for c in output_filename):
+            # 공백을 언더스코어로 대체하고 안전한 파일명 생성
+            safe_name = base_filename.replace(' ', '_')
+            # 특수문자 처리
+            safe_name = ''.join(c if c.isalnum() or c in '_-.' else '_' for c in safe_name)
+            output_filename = safe_name + '.pdf'
+
         if output_dir:
             base_output_path = os.path.join(output_dir, output_filename)
         else:
@@ -307,10 +316,18 @@ class ExcelToPdfConverter:
         
         while os.path.exists(output_path) and os.path.getsize(output_path) > 0:
             if self.overwrite_var.get():
-                # If overwrite is enabled, just use the existing path
+                # 덮어쓰기가 켜져 있으면 기존 경로 사용
                 break
-            # File exists, create a new name with counter
-            new_filename = f"{base_filename}_{counter}.pdf"
+            
+            # 파일이 존재하면 새 이름 생성 (카운터로)
+            # 한글 또는 공백이 있는 경우 안전한 파일명으로 처리
+            if "통합" in base_filename or ' ' in base_filename or any(ord(c) > 127 for c in base_filename):
+                safe_base = base_filename.replace(' ', '_')
+                # 특수문자 처리
+                safe_base = ''.join(c if c.isalnum() or c in '_-.' else '_' for c in safe_base)
+                new_filename = f"{safe_base}_{counter}.pdf"
+            else:
+                new_filename = f"{base_filename}_{counter}.pdf"
             
             if output_dir:
                 output_path = os.path.join(output_dir, new_filename)
@@ -345,26 +362,38 @@ class ExcelToPdfConverter:
         original_has_korean = "통합" in excel_path or any(ord(c) > 127 for c in excel_path)
         
         if original_has_korean:
-            # Create a temporary copy with a unique English filename
+            # 임시 파일 생성 - 한글 파일명에서 띄어쓰기를 언더스코어로 대체
             import tempfile
             import shutil
             import uuid
             
             temp_dir = tempfile.gettempdir()
-            temp_excel_path = os.path.join(temp_dir, f"excel_file_{uuid.uuid4().hex[:8]}{file_ext}")
+            
+            # 파일명에서 띄어쓰기를 언더스코어로 대체하고 안전한 임시 파일명 생성
+            filename = os.path.basename(excel_path)
+            
+            # 특수문자 및 공백 처리
+            safe_filename = filename.replace(' ', '_')
+            safe_filename = ''.join(c if c.isalnum() or c in '_-.' else '_' for c in safe_filename)
+            
+            # 여전히 한글이나 비ASCII 문자가 있으면 UUID 사용
+            if any(ord(c) > 127 for c in safe_filename):
+                temp_excel_path = os.path.join(temp_dir, f"excel_file_{uuid.uuid4().hex[:8]}{file_ext}")
+            else:
+                temp_excel_path = os.path.join(temp_dir, safe_filename)
             
             try:
-                # Create a copy of the original file with a unique English name
+                # 원본 파일의 복사본 생성
                 shutil.copy2(excel_path, temp_excel_path)
-                # Use this copy for conversion
+                # 이 복사본 사용
                 excel_path_to_use = temp_excel_path
-                self.log(f"Created temporary copy for Korean filename: {os.path.basename(excel_path)}", "info")
+                self.log(f"한글 파일명용 임시 파일 생성: {os.path.basename(excel_path)}", "info")
             except Exception as e:
-                # If copying fails, use the original path
+                # 복사 실패 시 원본 경로 사용
                 excel_path_to_use = excel_path
-                self.log(f"Warning: Could not create temporary file: {str(e)}", "error")
+                self.log(f"경고: 임시 파일을 생성할 수 없습니다: {str(e)}", "warning")
         else:
-            # Use the original path if no special characters
+            # 특수 문자가 없으면 원본 경로 사용
             excel_path_to_use = excel_path
         
         excel = None
@@ -397,8 +426,19 @@ class ExcelToPdfConverter:
             
             # Open the workbook with additional parameters for reliability
             try:
+                # excel_path_to_use 경로가 공백을 포함하거나 특수문자를 포함하는 경우 
+                # 큰따옴표로 감싸서 안전하게 처리
+                if ' ' in excel_path_to_use or any(c in excel_path_to_use for c in '()[]{}!@#$%^&*'):
+                    # 이미 따옴표가 있으면 제거 후 새로 추가
+                    if excel_path_to_use.startswith('"') and excel_path_to_use.endswith('"'):
+                        safe_excel_path = excel_path_to_use
+                    else:
+                        safe_excel_path = f'"{excel_path_to_use.replace("\"", "")}"'
+                else:
+                    safe_excel_path = excel_path_to_use
+                
                 wb = excel.Workbooks.Open(
-                    excel_path_to_use,  # Use the encoded filename if created
+                    safe_excel_path,  # 안전하게 처리된 파일 경로 사용
                     UpdateLinks=0,        # Don't update links
                     ReadOnly=True,        # Open in read-only mode
                     IgnoreReadOnlyRecommended=True,  # Ignore read-only recommendation
@@ -406,20 +446,47 @@ class ExcelToPdfConverter:
                     CorruptLoad=1         # Try to open even if file might be corrupt
                 )
             except com_error as e:
-                return False, f"Failed to open Excel file: {str(e)}"
+                # 첫 번째 시도가 실패하면 원래 경로로 다시 시도
+                try:
+                    wb = excel.Workbooks.Open(
+                        excel_path_to_use,  # 원래 경로 사용
+                        UpdateLinks=0,
+                        ReadOnly=True,
+                        IgnoreReadOnlyRecommended=True,
+                        Notify=False,
+                        CorruptLoad=1
+                    )
+                    self.log("대체 방법으로 Excel 파일 열기 성공", "info")
+                except com_error as e:
+                    return False, f"Failed to open Excel file: {str(e)}"
             
-            # Save as PDF using SaveAs method
+            # Save as PDF using SaveAs method - 큰따옴표로 경로 감싸기
             try:
                 # Use SaveAs method to save as PDF
+                # 경로에 공백이 있을 경우를 처리하기 위해 큰따옴표로 감싸기
+                # 경로에서 이미 있을 수 있는 따옴표 제거 후 다시 추가
+                safe_output_path = f'"{output_path.replace("\"", "")}"'
+                
+                # Excel에 경로 전달 시 따옴표로 감싼 경로 사용
                 wb.SaveAs(
-                    output_path,
+                    safe_output_path,
                     FileFormat=57  # 57 is the file format code for PDF
                 )
             except com_error as e:
-                # Capture the error but don't immediately return
-                # We'll check if the PDF was actually created despite the error
+                # 명시적으로 com_error_msg 변수 정의
                 com_error_msg = f"COM Error during SaveAs: {str(e)}"
-                pass
+                # 에러를 로그에 기록하지만 즉시 반환하지 않음
+                self.log(f"경고: COM 오류가 발생했습니다: {com_error_msg}", "warning")
+                
+                # 추가 시도: 따옴표 없이 원래 경로로 시도
+                try:
+                    wb.SaveAs(
+                        output_path,
+                        FileFormat=57
+                    )
+                    self.log("대체 방법으로 PDF 저장 시도", "info")
+                except:
+                    pass
             
             # Close the workbook
             try:
@@ -438,24 +505,46 @@ class ExcelToPdfConverter:
             # Always check if the PDF exists and is valid, even if there were COM errors
             # This handles cases where files with Korean names show COM errors but still create valid PDFs
             if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                # PDF was successfully created, with or without COM errors
-                if original_has_korean:
-                    # Properly decode Korean filename for display
-                    import urllib.parse
+                # PDF가 성공적으로 생성됨
+                
+                # URL 인코딩 문제 해결을 위한 추가 처리
+                # %20과 같은 URL 인코딩된 문자가 있는지 확인
+                pdf_filename = os.path.basename(output_path)
+                if '%' in pdf_filename:
+                    # URL 디코딩 시도
                     try:
-                        decoded_name = urllib.parse.unquote(os.path.basename(excel_path))
-                        # Check if the output filename is URL encoded
-                        output_basename = os.path.basename(output_path)
-                        if '%' in output_basename:
-                            self.log(f"Warning: PDF created but filename may be URL encoded: {output_basename}", "warning")
-                            self.log(f"✓ Successfully converted Korean filename: {decoded_name}", "success")
-                        else:
-                            self.log(f"✓ Successfully converted Korean filename: {decoded_name}", "success")
+                        import urllib.parse
+                        decoded_filename = urllib.parse.unquote(pdf_filename)
+                        decoded_path = os.path.join(os.path.dirname(output_path), decoded_filename)
+                        
+                        # 디코딩된 이름으로 파일 복사 시도
+                        if os.path.exists(output_path) and not os.path.exists(decoded_path):
+                            import shutil
+                            try:
+                                shutil.copy2(output_path, decoded_path)
+                                # 원본 삭제
+                                os.remove(output_path)
+                                # 출력 경로 업데이트
+                                output_path = decoded_path
+                                self.log(f"URL 인코딩된 PDF 파일명 수정됨: {decoded_filename}", "info")
+                            except:
+                                self.log(f"URL 인코딩된 파일명 수정 실패, 원본 유지: {pdf_filename}", "warning")
                     except:
-                        # If decoding fails, show warning about filename display
-                        self.log(f"Warning: PDF created but filename may not display correctly: {os.path.basename(output_path)}", "warning")
-                        self.log(f"✓ Successfully converted Korean filename: {os.path.basename(excel_path)}", "success")
-                    
+                        self.log(f"PDF 생성됨 (URL 인코딩됨): {pdf_filename}", "warning")
+                
+                # 한글 또는 특수 문자가 있는 파일명 처리
+                if original_has_korean:
+                    # 한글 파일명 표시
+                    try:
+                        import urllib.parse
+                        decoded_name = urllib.parse.unquote(os.path.basename(excel_path))
+                        self.log(f"✓ 한글 파일명 변환 성공: {decoded_name}", "success")
+                    except:
+                        self.log(f"✓ 한글 파일명 변환 성공: {os.path.basename(excel_path)}", "success")
+                else:
+                    # 일반 파일명 성공 메시지
+                    self.log(f"✓ 변환 성공: {os.path.basename(excel_path)}", "success")
+                
                 # Check if output_path is different from the original expected path (duplicate handling)
                 original_filename = os.path.splitext(excel_path)[0]
                 # Decode URL encoding if present for better display
